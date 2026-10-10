@@ -1,0 +1,33 @@
+name: Verificar BASE
+
+on:
+  push:
+    branches:
+      - build/initial
+    paths:
+      - baseline/**
+      - .github/workflows/verify-baseline.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verificar:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Obter arquivos do projeto
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Conferir SHA-256 do ZIP original
+        shell: bash
+        run: |
+          echo "0b9e43f5a3ae4726f333fbffaa165f1c4a20e74d129285e675d952b46cbffcf2  baseline/Turnip_Gen8_V35.zip" | sha256sum --check --strict
+
+      - name: Conferir integridade interna do ZIP
+        shell: bash
+        run: |
+          python3 -m zipfile --test baseline/Turnip_Gen8_V35.zip
