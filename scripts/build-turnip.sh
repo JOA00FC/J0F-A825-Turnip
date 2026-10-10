@@ -104,7 +104,7 @@ meson setup "$BUILD" "$SOURCE" \
   --cross-file "$WORK/android-cross.ini" \
   --buildtype=release \
   -Dplatforms=android \
-  -Dplatform-sdk-version="$API" \
+  -Dplatform-sdk-version=35 \
   -Dandroid-stub=true \
   -Dgallium-drivers= \
   -Dvulkan-drivers=freedreno \
