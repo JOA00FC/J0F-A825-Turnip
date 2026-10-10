@@ -1,0 +1,171 @@
+name: Compilar Turnip experimental
+
+on:
+  push:
+    branches:
+      - build/initial
+    paths:
+      - config/source.env
+      - scripts/build-turnip.sh
+      - .github/workflows/build-turnip.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Android ARM64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    env:
+      NDK_VERSION: "29.0.14206865"
+
+    steps:
+      - name: Baixar nosso projeto
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Instalar ferramentas
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential ninja-build pkg-config \
+            python3-venv flex bison glslang-tools
+
+          python3 -m venv "$RUNNER_TEMP/turnip-python"
+          "$RUNNER_TEMP/turnip-python/bin/python" -m pip install \
+            meson==1.9.1 \
+            Mako==1.3.10 \
+            PyYAML==6.0.2 \
+            packaging==25.0
+
+          echo "$RUNNER_TEMP/turnip-python/bin" >> "$GITHUB_PATH"
+
+      - name: Preparar Android NDK
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          : "${ANDROID_HOME:?Android SDK ausente no runner}"
+
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          test -x "$SDKMANAGER"
+          "$SDKMANAGER" --install "ndk;$NDK_VERSION"
+
+          NDK_PATH="$ANDROID_HOME/ndk/$NDK_VERSION"
+          test -f "$NDK_PATH/source.properties"
+          cat "$NDK_PATH/source.properties"
+
+          echo "ANDROID_NDK_HOME=$NDK_PATH" >> "$GITHUB_ENV"
+
+      - name: Compilar Turnip
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p out
+          bash scripts/build-turnip.sh 2>&1 | tee out/compile.log
+
+      - name: Registrar biblioteca e receita
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source config/source.env
+          OUT="out/$BUILD_ID"
+          READELF="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+
+          "$READELF" --file-header --dynamic \
+            "$OUT/libvulkan_freedreno.so" > "$OUT/elf-info.txt"
+
+          cp scripts/build-turnip.sh "$OUT/build-turnip.sh"
+          cp .github/workflows/build-turnip.yml "$OUT/build-turnip.yml"
+
+          {
+            echo "PROJECT_COMMIT=$GITHUB_SHA"
+            echo "RUN_ID=$GITHUB_RUN_ID"
+            echo "RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT"
+            echo "RUNNER_OS=$RUNNER_OS"
+          } >> "$OUT/build-info.txt"
+
+          python3 -m pip freeze > "$OUT/python-packages.txt"
+          dpkg-query -W > "$OUT/runner-packages.txt"
+
+      - name: Empacotar driver
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set -a
+          source config/source.env
+          set +a
+
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          from zipfile import ZipFile, ZIP_DEFLATED
+
+          build_id = os.environ["BUILD_ID"]
+          commit = os.environ["MESA_COMMIT"]
+          out = Path("out") / build_id
+          library = out / "libvulkan_freedreno.so"
+
+          info = {}
+          for line in (out / "build-info.txt").read_text().splitlines():
+              if "=" in line:
+                  key, value = line.split("=", 1)
+                  info[key] = value
+
+          version = info["MESA_VERSION"]
+          meta = {
+              "schemaVersion": 1,
+              "name": build_id,
+              "description": (
+                  f"Turnip experimental para testes no Poco F7. "
+                  f"Mesa {version}; commit {commit[:12]}. "
+                  "Desempenho e estabilidade ainda nao validados."
+              ),
+              "author": "JOA00FC; Mesa contributors",
+              "packageVersion": "1",
+              "vendor": "Mesa",
+              "driverVersion": f"Mesa {version}",
+              "minApi": 34,
+              "libraryName": library.name,
+          }
+
+          meta_path = out / "meta.json"
+          meta_path.write_text(
+              json.dumps(meta, indent=2, ensure_ascii=False) + "\n",
+              encoding="utf-8",
+          )
+
+          package = out / f"{build_id}.zip"
+          with ZipFile(package, "w", ZIP_DEFLATED) as archive:
+              archive.write(library, library.name)
+              archive.write(meta_path, meta_path.name)
+
+          with ZipFile(package) as archive:
+              assert set(archive.namelist()) == {
+                  "libvulkan_freedreno.so", "meta.json"
+              }
+              assert archive.testzip() is None
+
+          with (out / "SHA256SUMS").open("w") as checksums:
+              for path in (library, meta_path, package):
+                  digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                  checksums.write(f"{digest}  {path.name}\n")
+
+          print(f"Pacote criado: {package}")
+          PY
+
+      - name: Disponibilizar pacote e diagnosticos
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Turnip-experimental-${{ github.run_number }}-${{ github.run_attempt }}
+          path: out/
+          if-no-files-found: warn
+          retention-days: 30
