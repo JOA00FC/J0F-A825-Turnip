@@ -126,7 +126,23 @@ meson setup "$BUILD" "$SOURCE" \
 meson configure "$BUILD" > "$OUT/meson-options.txt"
 meson compile -C "$BUILD" -j 2
 
-LIB="$BUILD/src/freedreno/vulkan/libvulkan_freedreno.so"
+# Prepara os arquivos para distribuicao em uma pasta isolada.
+STAGE="$WORK/install"
+meson install -C "$BUILD" --no-rebuild --destdir "$STAGE"
+
+# Localiza a biblioteca preparada pela etapa de instalacao.
+LIB="$(python3 - "$STAGE" <<'PY'
+from pathlib import Path
+import sys
+
+matches = list(Path(sys.argv[1]).rglob("libvulkan_freedreno.so"))
+if len(matches) != 1:
+    raise SystemExit(
+        f"Esperava uma biblioteca instalada; encontrei {len(matches)}"
+    )
+print(matches[0])
+PY
+)"
 test -s "$LIB"
 
 cp "$LIB" "$OUT/libvulkan_freedreno.so"
