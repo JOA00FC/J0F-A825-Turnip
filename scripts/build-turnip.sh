@@ -102,7 +102,8 @@ cp "$ANDROID_NDK_HOME/source.properties" "$OUT/ndk-source.properties"
 # KGSL é a interface com o driver de kernel Qualcomm no Android.
 meson setup "$BUILD" "$SOURCE" \
   --cross-file "$WORK/android-cross.ini" \
-  --buildtype=release \
+  -Dbuildtype=custom \
+  -Ddebug=false \
   -Doptimization=2 \
   -Db_ndebug=true \
   -Dplatforms=android \
@@ -124,6 +125,20 @@ meson setup "$BUILD" "$SOURCE" \
   -Dexpat=disabled \
   -Dzstd=disabled \
   -Dshader-cache=enabled
+
+# Confere as opcoes efetivas antes de compilar.
+meson introspect --buildoptions "$BUILD" > "$OUT/meson-buildoptions.json"
+python3 - "$OUT/meson-buildoptions.json" <<'PY_CHECK'
+import json
+import sys
+with open(sys.argv[1]) as f:
+    options = {item['name']: item['value'] for item in json.load(f)}
+expected = {'optimization': '2', 'debug': False, 'b_ndebug': 'true'}
+for key, value in expected.items():
+    if options.get(key) != value:
+        raise SystemExit(f"Erro: {key}={options.get(key)!r}; esperado {value!r}")
+print('Configuracao O2 confirmada; debug e assertions desativados.')
+PY_CHECK
 
 meson configure "$BUILD" > "$OUT/meson-options.txt"
 meson compile -C "$BUILD" -j 2
