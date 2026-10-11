@@ -60,6 +60,50 @@ git -C "$SOURCE" checkout --detach FETCH_HEAD
 ACTUAL_COMMIT="$(git -C "$SOURCE" rev-parse HEAD)"
 test "$ACTUAL_COMMIT" = "$MESA_COMMIT"
 
+# Patch do experimento 004; guardado no artifact para auditoria.
+PATCH_FILE="$WORK/0001-a825-dxvk-profiled-autotune.patch"
+cat > "$PATCH_FILE" <<'J0F_PATCH'
+--- a/src/freedreno/vulkan/tu_autotune.cc
++++ b/src/freedreno/vulkan/tu_autotune.cc
+@@ -326,10 +326,26 @@
+       at_config = config_t(algo, (uint8_t) mod_flags);
+    });
+ 
++   config_t device_config = at_config;
++
++   /* J0F-A825-004: experimental measured render-mode selection for DXVK.
++    * Apply per device, outside the process-wide cached environment config.
++    * Keep explicit user overrides and other GPU/engine policies intact.
++    */
++   const char *engine_name = device->instance->vk.app_info.engine_name;
++   if ((uint32_t) device->physical_device->dev_id.chip_id == 0x44030000u &&
++       engine_name && std::string_view(engine_name) == "DXVK" &&
++       !os_get_option("TU_AUTOTUNE_ALGO") &&
++       !os_get_option("TU_AUTOTUNE_FLAGS") &&
++       device_config.is_enabled(algorithm::PREFER_SYSMEM)) {
++      device_config = config_t(algorithm::PROFILED, 0);
++      mesa_logi("J0F-A825-004: A825 DXVK autotune=profiled (experimental)");
++   }
++
+    if (TU_DEBUG(STARTUP))
+-      mesa_logi("TU_AUTOTUNE: %s", at_config.to_string().c_str());
+-
+-   return at_config;
++      mesa_logi("TU_AUTOTUNE: %s", device_config.to_string().c_str());
++
++   return device_config;
+ }
+ 
+ uint32_t
+J0F_PATCH
+
+git -C "$SOURCE" apply --check "$PATCH_FILE"
+git -C "$SOURCE" apply "$PATCH_FILE"
+cp "$PATCH_FILE" "$OUT/0001-a825-dxvk-profiled-autotune.patch"
+git -C "$SOURCE" diff --check
+git -C "$SOURCE" diff > "$OUT/applied-source.diff"
+sha256sum "$PATCH_FILE" > "$OUT/patch-sha256.txt"
+
 # Descreve o destino: Android ARM64.
 cat > "$WORK/android-cross.ini" <<EOF
 [binaries]
@@ -102,10 +146,7 @@ cp "$ANDROID_NDK_HOME/source.properties" "$OUT/ndk-source.properties"
 # KGSL é a interface com o driver de kernel Qualcomm no Android.
 meson setup "$BUILD" "$SOURCE" \
   --cross-file "$WORK/android-cross.ini" \
-  -Dbuildtype=custom \
-  -Ddebug=false \
-  -Doptimization=2 \
-  -Db_ndebug=true \
+  --buildtype=release \
   -Dplatforms=android \
   -Dplatform-sdk-version=35 \
   -Dandroid-stub=true \
@@ -126,28 +167,38 @@ meson setup "$BUILD" "$SOURCE" \
   -Dzstd=disabled \
   -Dshader-cache=enabled
 
-# Confere as opcoes efetivas antes de compilar.
+meson configure "$BUILD" > "$OUT/meson-options.txt"
 meson introspect --buildoptions "$BUILD" > "$OUT/meson-buildoptions.json"
+
 python3 - "$OUT/meson-buildoptions.json" <<'PY_CHECK'
 import json
 import sys
+
 with open(sys.argv[1]) as f:
-    options = {item['name']: item['value'] for item in json.load(f)}
-expected = {'optimization': '2', 'debug': False, 'b_ndebug': 'true'}
+    options = {i['name']: i['value'] for i in json.load(f)}
+
+expected = {
+    'buildtype': 'release',
+    'optimization': '3',
+    'debug': False,
+    'b_ndebug': 'if-release',
+    'platform-sdk-version': 35,
+}
+
 for key, value in expected.items():
     if options.get(key) != value:
-        raise SystemExit(f"Erro: {key}={options.get(key)!r}; esperado {value!r}")
-print('Configuracao O2 confirmada; debug e assertions desativados.')
+        raise SystemExit(
+            f"Unexpected {key}: {options.get(key)!r}; expected {value!r}"
+        )
 PY_CHECK
 
-meson configure "$BUILD" > "$OUT/meson-options.txt"
 meson compile -C "$BUILD" -j 2
 
-# Prepara os arquivos para distribuicao em uma pasta isolada.
+# Prepara os arquivos para distribuição em uma pasta isolada.
 STAGE="$WORK/install"
 meson install -C "$BUILD" --no-rebuild --destdir "$STAGE"
 
-# Localiza a biblioteca preparada pela etapa de instalacao.
+# Localiza a biblioteca preparada pela etapa de instalação.
 LIB="$(python3 - "$STAGE" <<'PY'
 from pathlib import Path
 import sys
@@ -160,6 +211,7 @@ if len(matches) != 1:
 print(matches[0])
 PY
 )"
+
 test -s "$LIB"
 
 cp "$LIB" "$OUT/libvulkan_freedreno.so"
