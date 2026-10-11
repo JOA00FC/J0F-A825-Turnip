@@ -103,6 +103,8 @@ cp "$ANDROID_NDK_HOME/source.properties" "$OUT/ndk-source.properties"
 meson setup "$BUILD" "$SOURCE" \
   --cross-file "$WORK/android-cross.ini" \
   --buildtype=release \
+  -Doptimization=2 \
+  -Db_ndebug=true \
   -Dplatforms=android \
   -Dplatform-sdk-version=35 \
   -Dandroid-stub=true \
