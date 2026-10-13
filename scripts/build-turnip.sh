@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Localiza o projeto independentemente da pasta de execução.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/config/source.env"
 
-# Estas ferramentas serão preparadas pelo GitHub Actions.
 : "${ANDROID_NDK_HOME:?O workflow deve definir ANDROID_NDK_HOME}"
 : "${BUILD_ID:?BUILD_ID ausente}"
 : "${MESA_REPOSITORY:?MESA_REPOSITORY ausente}"
@@ -21,7 +19,11 @@ if [[ ! "$BUILD_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
   exit 1
 fi
 
-# Esta receita roda no Linux x86_64 do GitHub Actions.
+if [[ "$BUILD_ID" != "J0F-A825-005" ]]; then
+  echo "Atualize config/source.env para J0F-A825-005 antes de compilar."
+  exit 1
+fi
+
 API=34
 TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
 CC="$TOOLCHAIN/bin/aarch64-linux-android${API}-clang"
@@ -35,7 +37,6 @@ test -x "$CC"
 test -x "$CXX"
 test -x "$TOOLCHAIN/bin/llvm-strip"
 
-# Cada execução usa uma pasta de trabalho nova.
 WORK="$(mktemp -d "$ROOT/.work-turnip-XXXXXX")"
 SOURCE="$WORK/mesa"
 BUILD="$WORK/build"
@@ -43,7 +44,6 @@ OUT="$ROOT/out/$BUILD_ID"
 
 mkdir -p "$OUT" "$WORK/empty-pkgconfig"
 
-# Preserva o diagnóstico do Meson, inclusive se houver erro.
 save_logs() {
   if [[ -f "$BUILD/meson-logs/meson-log.txt" ]]; then
     cp "$BUILD/meson-logs/meson-log.txt" "$OUT/meson-log.txt"
@@ -51,7 +51,6 @@ save_logs() {
 }
 trap save_logs EXIT
 
-# Baixa o commit fixado, sem seguir atualizações da branch.
 git init "$SOURCE"
 git -C "$SOURCE" remote add origin "$MESA_REPOSITORY"
 git -C "$SOURCE" fetch --depth=1 origin "$MESA_COMMIT"
@@ -60,18 +59,35 @@ git -C "$SOURCE" checkout --detach FETCH_HEAD
 ACTUAL_COMMIT="$(git -C "$SOURCE" rev-parse HEAD)"
 test "$ACTUAL_COMMIT" = "$MESA_COMMIT"
 
-# Patch do experimento 004; guardado no artifact para auditoria.
+# Inclui a base 004 e a otimizacao experimental 005.
 PATCH_FILE="$WORK/0001-a825-dxvk-profiled-autotune.patch"
+
 cat > "$PATCH_FILE" <<'J0F_PATCH'
 --- a/src/freedreno/vulkan/tu_autotune.cc
 +++ b/src/freedreno/vulkan/tu_autotune.cc
-@@ -326,10 +326,26 @@
+@@ -108,6 +108,7 @@
+    BIG_GMEM = BIT(1),         /* All RPs with >= 10 draws use GMEM. */
+    TUNE_SMALL = BIT(2),       /* Try tuning all RPs with <= 5 draws, ignored by default. */
+    PREEMPT_OPTIMIZE = BIT(3),  /* Attempts to minimize the preemption latency. */
++   J0F_SKIP_LOCKED = BIT(4),   /* Internal A825/DXVK optimization. */
+ };
+ 
+ /* Metric flags, for internal tracking of enabled metrics. */
+@@ -216,6 +217,7 @@
+       MODF_STR(BIG_GMEM);
+       MODF_STR(TUNE_SMALL);
+       MODF_STR(PREEMPT_OPTIMIZE);
++      MODF_STR(J0F_SKIP_LOCKED);
+       str += ")";
+ 
+       str += ", Metric Flags: 0x" + std::to_string(metric_flags) + " (";
+@@ -326,10 +328,26 @@
        at_config = config_t(algo, (uint8_t) mod_flags);
     });
  
 +   config_t device_config = at_config;
 +
-+   /* J0F-A825-004: experimental measured render-mode selection for DXVK.
++   /* J0F-A825-005: experimental measured render-mode selection for DXVK.
 +    * Apply per device, outside the process-wide cached environment config.
 +    * Keep explicit user overrides and other GPU/engine policies intact.
 +    */
@@ -81,8 +97,8 @@ cat > "$PATCH_FILE" <<'J0F_PATCH'
 +       !os_get_option("TU_AUTOTUNE_ALGO") &&
 +       !os_get_option("TU_AUTOTUNE_FLAGS") &&
 +       device_config.is_enabled(algorithm::PREFER_SYSMEM)) {
-+      device_config = config_t(algorithm::PROFILED, 0);
-+      mesa_logi("J0F-A825-004: A825 DXVK autotune=profiled (experimental)");
++      device_config = config_t(algorithm::PROFILED, (uint8_t) mod_flag::J0F_SKIP_LOCKED);
++      mesa_logi("J0F-A825-005: A825 DXVK profiled + skip locked measurements (experimental)");
 +   }
 +
     if (TU_DEBUG(STARTUP))
@@ -95,16 +111,60 @@ cat > "$PATCH_FILE" <<'J0F_PATCH'
  }
  
  uint32_t
+@@ -1199,6 +1217,20 @@
+       }
+ 
+     public:
++      /* Only PROFILED callers may use this: its learning probabilities stay
++       * in [1, 99]; endpoints are published only after a permanent lock.
++       * Read the atomic probability, not the queue-thread-only locked bool.
++       */
++      std::optional<render_mode> get_locked_mode() const
++      {
++         const uint32_t probability = sysmem_probability.load(std::memory_order_relaxed);
++         if (probability == 0)
++            return render_mode::GMEM;
++         if (probability == PROBABILITY_MAX)
++            return render_mode::SYSMEM;
++         return std::nullopt;
++      }
++
+       render_mode get_optimal_mode(rp_history &history)
+       {
+          uint32_t l_sysmem_probability = sysmem_probability.load(std::memory_order_relaxed);
+@@ -1897,7 +1929,21 @@
+    else
+       key = cb_ctx.generate_rp_key(pass, framebuffer, cmd_buffer);
+ 
+-   rp_history &history = *find_or_create_rp_history(key);
++   auto history_handle = find_or_create_rp_history(key);
++   rp_history &history = *history_handle;
++
++   /* J0F-A825-005: keep all earlier safety/mode overrides. Once PROFILED
++    * has permanently locked, fresh metrics cannot change its decision.
++    * Leave rp_ctx null: the existing emission hooks already handle that.
++    * Never skip latency tracking or explicit mode overrides.
++    */
++   if (config.test(mod_flag::J0F_SKIP_LOCKED) &&
++       config.is_enabled(algorithm::PROFILED) &&
++       !config.test(mod_flag::PREEMPT_OPTIMIZE) && !early_return_mode) {
++      if (auto mode = history.profiled.get_locked_mode())
++         return *mode;
++   }
++
+    if (config.test(mod_flag::PREEMPT_OPTIMIZE)) {
+       if (!latency_info && !key_opt)
+          latency_info = get_rp_latency_info(key.hash, true);
 J0F_PATCH
 
 git -C "$SOURCE" apply --check "$PATCH_FILE"
 git -C "$SOURCE" apply "$PATCH_FILE"
 cp "$PATCH_FILE" "$OUT/0001-a825-dxvk-profiled-autotune.patch"
+
 git -C "$SOURCE" diff --check
 git -C "$SOURCE" diff > "$OUT/applied-source.diff"
 sha256sum "$PATCH_FILE" > "$OUT/patch-sha256.txt"
 
-# Descreve o destino: Android ARM64.
 cat > "$WORK/android-cross.ini" <<EOF
 [binaries]
 c = '$CC'
@@ -127,7 +187,6 @@ pkg_config_libdir = '$WORK/empty-pkgconfig'
 cpp_link_args = ['-static-libstdc++']
 EOF
 
-# Guarda a identificação das ferramentas e do código.
 cp "$ROOT/config/source.env" "$OUT/source.env"
 cp "$WORK/android-cross.ini" "$OUT/android-cross.ini"
 cp "$ANDROID_NDK_HOME/source.properties" "$OUT/ndk-source.properties"
@@ -142,8 +201,7 @@ cp "$ANDROID_NDK_HOME/source.properties" "$OUT/ndk-source.properties"
   "$CC" --version
 } > "$OUT/build-info.txt"
 
-# Compila somente o driver Vulkan Freedreno/Turnip.
-# KGSL é a interface com o driver de kernel Qualcomm no Android.
+# Mantem a receita O3 usada pela 004.
 meson setup "$BUILD" "$SOURCE" \
   --cross-file "$WORK/android-cross.ini" \
   --buildtype=release \
@@ -175,14 +233,14 @@ import json
 import sys
 
 with open(sys.argv[1]) as f:
-    options = {i['name']: i['value'] for i in json.load(f)}
+    options = {i["name"]: i["value"] for i in json.load(f)}
 
 expected = {
-    'buildtype': 'release',
-    'optimization': '3',
-    'debug': False,
-    'b_ndebug': 'if-release',
-    'platform-sdk-version': 35,
+    "buildtype": "release",
+    "optimization": "3",
+    "debug": False,
+    "b_ndebug": "if-release",
+    "platform-sdk-version": 35,
 }
 
 for key, value in expected.items():
@@ -194,11 +252,9 @@ PY_CHECK
 
 meson compile -C "$BUILD" -j 2
 
-# Prepara os arquivos para distribuição em uma pasta isolada.
 STAGE="$WORK/install"
 meson install -C "$BUILD" --no-rebuild --destdir "$STAGE"
 
-# Localiza a biblioteca preparada pela etapa de instalação.
 LIB="$(python3 - "$STAGE" <<'PY'
 from pathlib import Path
 import sys
