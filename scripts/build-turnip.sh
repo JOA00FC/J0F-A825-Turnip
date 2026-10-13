@@ -19,8 +19,8 @@ if [[ ! "$BUILD_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
   exit 1
 fi
 
-if [[ "$BUILD_ID" != "J0F-A825-006" ]]; then
-  echo "Atualize config/source.env para J0F-A825-006 antes de compilar."
+if [[ "$BUILD_ID" != "J0F-A825-007" ]]; then
+  echo "Atualize config/source.env para J0F-A825-007 antes de compilar."
   exit 1
 fi
 
@@ -59,7 +59,7 @@ git -C "$SOURCE" checkout --detach FETCH_HEAD
 ACTUAL_COMMIT="$(git -C "$SOURCE" rev-parse HEAD)"
 test "$ACTUAL_COMMIT" = "$MESA_COMMIT"
 
-# Base 005 + correcao e transferencia de referencias do historico (006).
+# Base 005 + protecao de referencias 006 + simplificacao das medias 007.
 PATCH_FILE="$WORK/0001-a825-dxvk-profiled-autotune.patch"
 
 cat > "$PATCH_FILE" <<'J0F_PATCH'
@@ -87,7 +87,7 @@ cat > "$PATCH_FILE" <<'J0F_PATCH'
  
 +   config_t device_config = at_config;
 +
-+   /* J0F-A825-006: experimental measured render-mode selection for DXVK.
++   /* J0F-A825-007: experimental measured render-mode selection for DXVK.
 +    * Apply per device, outside the process-wide cached environment config.
 +    * Keep explicit user overrides and other GPU/engine policies intact.
 +    */
@@ -98,7 +98,7 @@ cat > "$PATCH_FILE" <<'J0F_PATCH'
 +       !os_get_option("TU_AUTOTUNE_FLAGS") &&
 +       device_config.is_enabled(algorithm::PREFER_SYSMEM)) {
 +      device_config = config_t(algorithm::PROFILED, (uint8_t) mod_flag::J0F_SKIP_LOCKED);
-+      mesa_logi("J0F-A825-006: A825 DXVK profiled + skip locked + history ownership fix (experimental)");
++      mesa_logi("J0F-A825-007: A825 DXVK profiled + skip locked + history fix + single-writer EMA (experimental)");
 +   }
 +
     if (TU_DEBUG(STARTUP))
@@ -111,7 +111,26 @@ cat > "$PATCH_FILE" <<'J0F_PATCH'
  }
  
  uint32_t
-@@ -1199,6 +1217,20 @@
+@@ -921,10 +939,14 @@
+    {
+       double v = static_cast<double>(value);
+       double current = average.load(std::memory_order_relaxed);
+-      double new_avg;
+-      do {
+-         new_avg = std::isnan(current) ? v : (1.0 - alpha) * current + alpha * v;
+-      } while (!average.compare_exchange_weak(current, new_avg, std::memory_order_relaxed, std::memory_order_relaxed));
++      /* J0F-A825-007: updates are serialized by device->submit_mutex via
++       * on_submit/process_entries. Teardown also has exclusive access.
++       * Readers never modify average, so a CAS retry loop is unnecessary.
++       * Keep atomic publication for concurrent readers. If a second writer
++       * is introduced, this single-writer assumption must be revisited.
++       */
++      double new_avg = std::isnan(current) ? v : (1.0 - alpha) * current + alpha * v;
++      average.store(new_avg, std::memory_order_relaxed);
+    }
+ 
+    void clear() noexcept
+@@ -1199,6 +1221,20 @@
        }
  
      public:
@@ -132,7 +151,7 @@ cat > "$PATCH_FILE" <<'J0F_PATCH'
        render_mode get_optimal_mode(rp_history &history)
        {
           uint32_t l_sysmem_probability = sysmem_probability.load(std::memory_order_relaxed);
-@@ -1388,9 +1420,13 @@
+@@ -1388,9 +1424,13 @@
  tu_autotune::rp_history_handle
  tu_autotune::find_or_create_rp_history(const rp_key &key)
  {
@@ -148,7 +167,7 @@ cat > "$PATCH_FILE" <<'J0F_PATCH'
  
     /* If we reach here, we have to create a new history. */
     std::unique_lock lock(rp_mutex);
-@@ -1897,7 +1933,21 @@
+@@ -1897,7 +1937,21 @@
     else
        key = cb_ctx.generate_rp_key(pass, framebuffer, cmd_buffer);
  
@@ -171,7 +190,7 @@ cat > "$PATCH_FILE" <<'J0F_PATCH'
     if (config.test(mod_flag::PREEMPT_OPTIMIZE)) {
        if (!latency_info && !key_opt)
           latency_info = get_rp_latency_info(key.hash, true);
-@@ -1917,7 +1967,10 @@
+@@ -1917,7 +1971,10 @@
           history.preempt_optimize.mark_as_latency_sensitive();
        }
     }
