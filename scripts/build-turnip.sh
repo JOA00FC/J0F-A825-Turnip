@@ -19,8 +19,8 @@ if [[ ! "$BUILD_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
   exit 1
 fi
 
-if [[ "$BUILD_ID" != "J0F-A825-005" ]]; then
-  echo "Atualize config/source.env para J0F-A825-005 antes de compilar."
+if [[ "$BUILD_ID" != "J0F-A825-006" ]]; then
+  echo "Atualize config/source.env para J0F-A825-006 antes de compilar."
   exit 1
 fi
 
@@ -59,7 +59,7 @@ git -C "$SOURCE" checkout --detach FETCH_HEAD
 ACTUAL_COMMIT="$(git -C "$SOURCE" rev-parse HEAD)"
 test "$ACTUAL_COMMIT" = "$MESA_COMMIT"
 
-# Inclui a base 004 e a otimizacao experimental 005.
+# Base 005 + correcao e transferencia de referencias do historico (006).
 PATCH_FILE="$WORK/0001-a825-dxvk-profiled-autotune.patch"
 
 cat > "$PATCH_FILE" <<'J0F_PATCH'
@@ -87,7 +87,7 @@ cat > "$PATCH_FILE" <<'J0F_PATCH'
  
 +   config_t device_config = at_config;
 +
-+   /* J0F-A825-005: experimental measured render-mode selection for DXVK.
++   /* J0F-A825-006: experimental measured render-mode selection for DXVK.
 +    * Apply per device, outside the process-wide cached environment config.
 +    * Keep explicit user overrides and other GPU/engine policies intact.
 +    */
@@ -98,7 +98,7 @@ cat > "$PATCH_FILE" <<'J0F_PATCH'
 +       !os_get_option("TU_AUTOTUNE_FLAGS") &&
 +       device_config.is_enabled(algorithm::PREFER_SYSMEM)) {
 +      device_config = config_t(algorithm::PROFILED, (uint8_t) mod_flag::J0F_SKIP_LOCKED);
-+      mesa_logi("J0F-A825-005: A825 DXVK profiled + skip locked measurements (experimental)");
++      mesa_logi("J0F-A825-006: A825 DXVK profiled + skip locked + history ownership fix (experimental)");
 +   }
 +
     if (TU_DEBUG(STARTUP))
@@ -132,7 +132,23 @@ cat > "$PATCH_FILE" <<'J0F_PATCH'
        render_mode get_optimal_mode(rp_history &history)
        {
           uint32_t l_sysmem_probability = sysmem_probability.load(std::memory_order_relaxed);
-@@ -1897,7 +1929,21 @@
+@@ -1388,9 +1420,13 @@
+ tu_autotune::rp_history_handle
+ tu_autotune::find_or_create_rp_history(const rp_key &key)
+ {
+-   rp_history *existing = find_rp_history(key);
++   /* J0F-A825-006: retain the lookup reference until ownership is returned.
++    * Converting the temporary handle to a raw pointer released it too early,
++    * allowing concurrent history reaping before the reference was reacquired.
++    */
++   auto existing = find_rp_history(key);
+    if (existing)
+-      return *existing;
++      return existing;
+ 
+    /* If we reach here, we have to create a new history. */
+    std::unique_lock lock(rp_mutex);
+@@ -1897,7 +1933,21 @@
     else
        key = cb_ctx.generate_rp_key(pass, framebuffer, cmd_buffer);
  
@@ -155,6 +171,18 @@ cat > "$PATCH_FILE" <<'J0F_PATCH'
     if (config.test(mod_flag::PREEMPT_OPTIMIZE)) {
        if (!latency_info && !key_opt)
           latency_info = get_rp_latency_info(key.hash, true);
+@@ -1917,7 +1967,10 @@
+          history.preempt_optimize.mark_as_latency_sensitive();
+       }
+    }
+-   *rp_ctx = cb_ctx.attach_rp_entry(device, history, config, rp_state->drawcall_count);
++   /* Transfer the existing reference to the entry instead of acquiring another.
++    * The entry now keeps the history alive for the remaining decisions below.
++    */
++   *rp_ctx = cb_ctx.attach_rp_entry(device, std::move(history_handle), config, rp_state->drawcall_count);
+ 
+    if (config.test(mod_flag::PREEMPT_OPTIMIZE) && history.preempt_optimize.is_latency_sensitive()) {
+       /* Try to mitigate the risk of high preemption latency by always using GMEM, which should break up any larger
 J0F_PATCH
 
 git -C "$SOURCE" apply --check "$PATCH_FILE"
