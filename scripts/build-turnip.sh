@@ -565,8 +565,8 @@ import sys
 matches = list(Path(sys.argv[1]).rglob("libvulkan_freedreno.so"))
 if len(matches) != 1:
     raise SystemExit(
-        f"Esperava uma biblioteca instalada; encontrei {len(matches)}"
-    )
+        f"Esperava uma biblioteca instalada encontrei {len(matches)}"
+        )
 print(matches[0])
 PY
 )"
@@ -577,7 +577,7 @@ cp "$LIB" "$OUT/libvulkan_freedreno.so"
 "$TOOLCHAIN/bin/llvm-strip" --strip-unneeded \
   "$OUT/libvulkan_freedreno.so"
 
-# A biblioteca instalada precisa preservar a ABI do carregador Vulkan.
+  # A biblioteca instalada precisa preservar a ABI do carregador Vulkan.
 "$TOOLCHAIN/bin/llvm-readelf" --wide --file-header --dynamic --dyn-syms \
   "$OUT/libvulkan_freedreno.so" > "$OUT/elf-validation.txt"
 python3 - "$OUT/elf-validation.txt" <<'J0F_ELF_CHECK'
@@ -594,4 +594,4 @@ J0F_ELF_CHECK
   sha256sum libvulkan_freedreno.so > SHA256SUMS
 )
 
-echo "Biblioteca gerada em: $OUT
+echo "Biblioteca gerada em: $OUT"
