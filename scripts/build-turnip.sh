@@ -565,4 +565,33 @@ import sys
 matches = list(Path(sys.argv[1]).rglob("libvulkan_freedreno.so"))
 if len(matches) != 1:
     raise SystemExit(
-        f"Esperava uma biblio
+        f"Esperava uma biblioteca instalada; encontrei {len(matches)}"
+    )
+print(matches[0])
+PY
+)"
+
+test -s "$LIB"
+
+cp "$LIB" "$OUT/libvulkan_freedreno.so"
+"$TOOLCHAIN/bin/llvm-strip" --strip-unneeded \
+  "$OUT/libvulkan_freedreno.so"
+
+# A biblioteca instalada precisa preservar a ABI do carregador Vulkan.
+"$TOOLCHAIN/bin/llvm-readelf" --wide --file-header --dynamic --dyn-syms \
+  "$OUT/libvulkan_freedreno.so" > "$OUT/elf-validation.txt"
+python3 - "$OUT/elf-validation.txt" <<'J0F_ELF_CHECK'
+import pathlib, re, sys
+text = pathlib.Path(sys.argv[1]).read_text()
+assert re.search(r'Machine:\s+AArch64', text), 'ELF nao e AArch64'
+assert '(RPATH)' not in text and '(RUNPATH)' not in text, 'Caminho de build vazou no ELF'
+for symbol in ('vk_icdGetInstanceProcAddr', 'vk_icdNegotiateLoaderICDInterfaceVersion'):
+    assert re.search(r'\b' + symbol + r'\b', text), 'Export Vulkan ausente: ' + symbol
+J0F_ELF_CHECK
+
+(
+  cd "$OUT"
+  sha256sum libvulkan_freedreno.so > SHA256SUMS
+)
+
+echo "Biblioteca gerada em: $OUT
