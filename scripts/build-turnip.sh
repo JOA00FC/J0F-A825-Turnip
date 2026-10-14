@@ -585,8 +585,7 @@ import pathlib, re, sys
 text = pathlib.Path(sys.argv[1]).read_text()
 assert re.search(r'Machine:\s+AArch64', text), 'ELF nao e AArch64'
 assert '(RPATH)' not in text and '(RUNPATH)' not in text, 'Caminho de build vazou no ELF'
-for symbol in ('vk_icdGetInstanceProcAddr', 'vk_icdNegotiateLoaderICDInterfaceVersion'):
-    assert re.search(r'\b' + symbol + r'\b', text), 'Export Vulkan ausente: ' + symbol
+assert re.search(r'\bOBJECT\s+GLOBAL\s+DEFAULT\s+(?!UND\b)\S+\s+HMI\b', text), 'Export Android HMI ausente ou indefinido'
 J0F_ELF_CHECK
 
 (
